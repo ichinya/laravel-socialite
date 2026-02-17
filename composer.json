@@ -11,7 +11,7 @@
         "oauth2-client"
     ],
     "homepage": "https://github.com/ichinya/laravel-socialite",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "license": "MIT",
     "authors": [
         {
@@ -21,8 +21,8 @@
         }
     ],
     "require": {
-        "php": "^8.2",
-        "laravel/framework": "^12.2",
+        "php": "^8.3|8.4|8.5",
+        "laravel/framework": "^12",
         "laravel/socialite": "*"
     },
     "require-dev": {

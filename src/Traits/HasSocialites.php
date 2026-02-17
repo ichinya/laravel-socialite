@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
  * @property SocialAccount[] $socials
+ *
  * @mixin Model
  * @mixin Authenticatable
  */

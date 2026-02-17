@@ -2,36 +2,52 @@
 
 namespace Ichinya\LaravelSocialite;
 
-use App\Http\Exceptions\AuthException;
 use App\Models\User;
-use App\MoonShine\Pages\ProfilePage;
 use Ichinya\LaravelSocialite\Models\SocialAccount;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Http\RedirectResponse;
-use Illuminate\Support\Facades\Storage;
+use Illuminate\Http\Response;
+use Illuminate\Routing\Controller;
+use Illuminate\Support\Str;
 use Laravel\Socialite\Contracts\User as SocialiteUser;
 use Laravel\Socialite\Facades\Socialite;
-use MoonShine\Laravel\Http\Controllers\MoonShineController;
-use MoonShine\Support\Enums\ToastType;
 use RuntimeException;
+use Symfony\Component\HttpFoundation\RedirectResponse as SymfonyRedirectResponse;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Throwable;
 
-class LaravelSocialite extends MoonShineController
+class LaravelSocialite extends Controller
 {
-
-    /**
-     * @throws AuthException
-     */
-    public function redirect(string $driver)
+    public function redirect(string $driver): RedirectResponse|Response
     {
         $this->ensureSocialiteIsInstalled();
 
         if (!$this->hasDriver($driver)) {
-            throw AuthException::driverNotFound();
+            throw new NotFoundHttpException("Socialite driver [$driver] is not configured.");
         }
 
-        return Socialite::driver($driver)->redirect();
-    }
+        $redirect = Socialite::driver($driver)->redirect();
 
+        if ($redirect instanceof RedirectResponse) {
+            return $redirect;
+        }
+
+        if ($redirect instanceof SymfonyRedirectResponse) {
+            return redirect()->away($redirect->getTargetUrl());
+        }
+
+        if (is_string($redirect)) {
+            if (filter_var($redirect, FILTER_VALIDATE_URL)) {
+                return redirect()->away($redirect);
+            }
+
+            return response($redirect);
+        }
+
+        throw new RuntimeException(
+            'Unsupported redirect response from Socialite driver ['.$driver.']: '.get_debug_type($redirect)
+        );
+    }
 
     protected function ensureSocialiteIsInstalled(): void
     {
@@ -39,9 +55,7 @@ class LaravelSocialite extends MoonShineController
             return;
         }
 
-        throw new RuntimeException(
-            'Please install the Socialite: laravel/socialite'
-        );
+        throw new RuntimeException('Please install the Socialite: laravel/socialite');
     }
 
     protected function hasDriver(string $driver): bool
@@ -54,147 +68,145 @@ class LaravelSocialite extends MoonShineController
         return config('socialite.drivers', []);
     }
 
-
-    /**
-     * @throws AuthException
-     */
     public function callback(string $driver): RedirectResponse
     {
         $this->ensureSocialiteIsInstalled();
 
         if (!$this->hasDriver($driver)) {
-            throw AuthException::driverNotFound();
+            throw new NotFoundHttpException("Socialite driver [$driver] is not configured.");
         }
 
-        $socialiteUser = Socialite::driver($driver)->user();
+        try {
+            $provider = Socialite::driver($driver);
+            if ($this->isStateless($driver)) {
+                $provider = $provider->stateless();
+            }
 
-        // проверяем делаем привязку из профиля или нет
+            $socialiteUser = $provider->user();
+        } catch (Throwable $e) {
+            return $this->redirectToConfigured('on_error')
+                ->withErrors([
+                    'socialite' => "Authorization via [$driver] failed: {$e->getMessage()}",
+                ]);
+        }
+
         if ($this->auth()->check()) {
-            return $this->bindAccount($this->auth()->user(), $socialiteUser, $driver);
+            $authUser = $this->auth()->user();
+            $this->bindAccount($authUser, $socialiteUser, $driver);
+            if ($authUser instanceof User) {
+                $this->syncTelegramProfile($authUser, $socialiteUser, $driver);
+            }
+
+            return $this->redirectToConfigured('after_bind');
         }
 
-        // проверяем есть ли привязки
         $account = SocialAccount::query()
             ->where('driver', $driver)
-            ->where('identity', $socialiteUser->getId())
+            ->where('identity', (string) $socialiteUser->getId())
             ->first();
 
-
         if ($account instanceof SocialAccount) {
-            // авторизуем пользователя
+            $existingUser = User::query()->find($account->user_id);
+            if ($existingUser) {
+                $this->bindAccount($existingUser, $socialiteUser, $driver);
+                $this->syncTelegramProfile($existingUser, $socialiteUser, $driver);
+            }
+
             $this->auth()->loginUsingId($account->user_id);
-            // редиректим на главную
-            return redirect(moonshineRouter()->getEndpoints()->home());
+
+            return $this->redirectToConfigured('after_login');
         }
 
-
-        // привязки нет, проверяем email
-        if (empty($socialiteUser->getEmail())) {
-            $this->toast('oauth не предоставил email', ToastType::ERROR);
-            return redirect(moonshineRouter()->to('login'))->withErrors(['username' => 'oauth не предоставил email',]);
-        }
-
-        // проверяем есть ли пользователь с таким email
-        $user = User::query()->with('socials')->where('email', $socialiteUser->getEmail())->first();
-
-        if ($user && $user->socials->count() > 0) {
-            $this->toast('У пользователя уже есть привязки, дополнительные делаются из профиля', ToastType::ERROR);
-            return redirect(moonshineRouter()->to('login'))->withErrors(['username' => 'У пользователя уже есть привязки, дополнительные делаются из профиля',]);
-        }
-
-        // если пользователь не найден, создаем
-        if (!$user) {
-            $user = User::query()->create([
-                'email' => $socialiteUser->getEmail(),
-                'name' => $socialiteUser->getName(),
-                'password' => bcrypt($socialiteUser->getId()),
-                'avatar' => $this->saveAvatar($socialiteUser->getAvatar()),
-            ]);
-        }
-
-        // авторизуем пользователя
+        $user = $this->resolveUser($socialiteUser, $driver);
         $this->auth()->loginUsingId($user->id);
-        // привязываем аккаунт
-        return $this->bindAccount($user, $socialiteUser, $driver);
+        $this->bindAccount($user, $socialiteUser, $driver);
+        $this->syncTelegramProfile($user, $socialiteUser, $driver);
+
+        return $this->redirectToConfigured('after_login');
     }
 
-
-    protected function bindAccount(Authenticatable $user, SocialiteUser $socialUser, string $driver): RedirectResponse
+    protected function bindAccount(Authenticatable $user, SocialiteUser $socialUser, string $driver): void
     {
-        $account = SocialAccount::query()
-            ->where('user_id', $user->id)
-            ->where('driver', $driver)
-            ->first();
-
-        if ($account instanceof SocialAccount) {
-            $this->toast('Аккаунт уже привязан');
-            $account->update([
-                'username' => $socialUser->getNickname(),
-                'email' => $socialUser->getEmail(),
-                'avatar' => $socialUser->getAvatar(),
-            ]);
-            if (!empty($socialUser->getAvatar()) && empty($user->avatar)) {
-                $user->update(['avatar' => $this->saveAvatar($socialUser->getAvatar())]);
-            }
-        } else {
-            SocialAccount::query()->create([
+        SocialAccount::query()->updateOrCreate(
+            [
                 'user_id' => $user->id,
                 'driver' => $driver,
-                'identity' => $socialUser->getId(),
+            ],
+            [
+                'identity' => (string) $socialUser->getId(),
                 'username' => $socialUser->getNickname(),
                 'email' => $socialUser->getEmail(),
                 'avatar' => $socialUser->getAvatar(),
-            ]);
-            if (!empty($socialUser->getEmail())) {
-                $user->update(['email' => $socialUser->getEmail()]);
-            }
-            if (!empty($socialUser->getAvatar()) && empty($user->avatar)) {
-                $user->update(['avatar' => $this->saveAvatar($socialUser->getAvatar())]);
-            }
-
-            $this->toast('Аккаунт привязан', ToastType::SUCCESS);
-        }
-
-        return toPage(moonshineConfig()->getPage('profile', ProfilePage::class), redirect: true);
+            ]
+        );
     }
 
-    private function saveAvatar(?string $avatar): ?string
+    protected function resolveUser(SocialiteUser $socialiteUser, string $driver): User
     {
-        if (empty($avatar)) {
-            return null;
+        $identity = (string) $socialiteUser->getId();
+        $email = $socialiteUser->getEmail();
+        $name = $socialiteUser->getName()
+            ?: $socialiteUser->getNickname()
+                ?: ucfirst($driver).' user';
+
+        if (!empty($email)) {
+            return User::query()->firstOrCreate(
+                ['email' => $email],
+                [
+                    'name' => $name,
+                    'password' => bcrypt(Str::random(40)),
+                ]
+            );
         }
 
-        $content = file_get_contents($avatar);
+        $fallbackEmail = sprintf(
+            '%s_%s@social.local',
+            $driver,
+            preg_replace('/[^A-Za-z0-9_.-]/', '_', $identity)
+        );
 
-        // Создаем объект finfo для определения MIME-типа
-        $finfo = finfo_open(FILEINFO_MIME_TYPE);
-        $mimeType = finfo_buffer($finfo, $content);
-        finfo_close($finfo);
-
-        // Определяем расширение файла на основе MIME-типа
-        $extension = match ($mimeType) {
-            'image/png' => 'png',
-            'image/gif' => 'gif',
-            'image/webp' => 'webp',
-            'image/bmp' => 'bmp',
-            'image/tiff' => 'tiff',
-            'image/svg+xml' => 'svg',
-            'image/x-icon', 'image/vnd.microsoft.icon' => 'ico',
-            default => 'jpg', // По умолчанию используем jpg, если тип неизвестен
-        };
-
-        $path = 'avatars/' . md5($avatar) . '.' . $extension;
-        $disk = Storage::disk(moonshineConfig()->getDisk());
-
-        if ($disk->exists($path)) {
-            return $path;
-        }
-
-        $disk->put($path, $content);
-
-        return $path;
-
+        return User::query()->firstOrCreate(
+            ['email' => $fallbackEmail],
+            [
+                'name' => $name,
+                'password' => bcrypt(Str::random(40)),
+            ]
+        );
     }
 
+    protected function syncTelegramProfile(User $user, SocialiteUser $socialiteUser, string $driver): void
+    {
+        if ($driver !== 'telegram') {
+            return;
+        }
 
+        if (empty($user->name)) {
+            $user->name = $socialiteUser->getName()
+                ?: (empty($socialiteUser->getNickname()) ? null : '@'.$socialiteUser->getNickname())
+                    ?: 'Telegram user';
+
+            $user->save();
+        }
+    }
+
+    protected function isStateless(string $driver): bool
+    {
+        return (bool) data_get(config('socialite.stateless_drivers', []), $driver, false);
+    }
+
+    protected function auth(): \Illuminate\Contracts\Auth\Guard
+    {
+        return auth()->guard();
+    }
+
+    protected function redirectToConfigured(string $key): RedirectResponse
+    {
+        $target = (string) config("socialite.redirects.$key", '/');
+
+        if (Str::startsWith($target, 'route:')) {
+            return redirect()->route(Str::after($target, 'route:'));
+        }
+
+        return redirect($target);
+    }
 }
