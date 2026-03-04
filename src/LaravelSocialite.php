@@ -45,7 +45,7 @@ class LaravelSocialite extends Controller
         }
 
         throw new RuntimeException(
-            'Unsupported redirect response from Socialite driver ['.$driver.']: '.get_debug_type($redirect)
+            'Unsupported redirect response from Socialite driver [' . $driver . ']: ' . get_debug_type($redirect)
         );
     }
 
@@ -147,7 +147,7 @@ class LaravelSocialite extends Controller
         $email = $socialiteUser->getEmail();
         $name = $socialiteUser->getName()
             ?: $socialiteUser->getNickname()
-                ?: ucfirst($driver).' user';
+                ?: ucfirst($driver) . ' user';
 
         if (!empty($email)) {
             return User::query()->firstOrCreate(
@@ -182,7 +182,7 @@ class LaravelSocialite extends Controller
 
         if (empty($user->name)) {
             $user->name = $socialiteUser->getName()
-                ?: (empty($socialiteUser->getNickname()) ? null : '@'.$socialiteUser->getNickname())
+                ?: (empty($socialiteUser->getNickname()) ? null : '@' . $socialiteUser->getNickname())
                     ?: 'Telegram user';
 
             $user->save();
