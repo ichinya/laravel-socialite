@@ -3,12 +3,16 @@
 namespace Ichinya\LaravelSocialite;
 
 use App\Models\User;
+use Closure;
+use Ichinya\LaravelSocialite\Contracts\RedirectHook;
 use Ichinya\LaravelSocialite\Models\SocialAccount;
+use Ichinya\LaravelSocialite\Support\RedirectResponseNormalizer;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\Guard;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Laravel\Socialite\Contracts\User as SocialiteUser;
 use Laravel\Socialite\Facades\Socialite;
@@ -27,27 +31,14 @@ class LaravelSocialite extends Controller
             throw new NotFoundHttpException("Socialite driver [$driver] is not configured.");
         }
 
-        $redirect = Socialite::driver($driver)->redirect();
-
-        if ($redirect instanceof RedirectResponse) {
-            return $redirect;
-        }
-
-        if ($redirect instanceof SymfonyRedirectResponse) {
-            return redirect()->away($redirect->getTargetUrl());
-        }
-
-        if (is_string($redirect)) {
-            if (filter_var($redirect, FILTER_VALIDATE_URL)) {
-                return redirect()->away($redirect);
-            }
-
-            return response($redirect);
-        }
-
-        throw new RuntimeException(
-            'Unsupported redirect response from Socialite driver [' . $driver . ']: ' . get_debug_type($redirect)
+        $provider = Socialite::driver($driver);
+        $response = $this->applyRedirectHook(
+            driver: $driver,
+            provider: $provider,
+            fallback: static fn(): mixed => $provider->redirect()
         );
+
+        return $this->redirectResponseNormalizer()->normalize($driver, $response);
     }
 
     protected function ensureSocialiteIsInstalled(): void
@@ -67,6 +58,11 @@ class LaravelSocialite extends Controller
     protected function drivers(): array
     {
         return config('socialite.drivers', []);
+    }
+
+    protected function redirectHooks(): array
+    {
+        return config('socialite.redirect_hooks', []);
     }
 
     public function callback(string $driver): RedirectResponse
@@ -103,7 +99,7 @@ class LaravelSocialite extends Controller
 
         $account = SocialAccount::query()
             ->where('driver', $driver)
-            ->where('identity', (string) $socialiteUser->getId())
+            ->where('identity', (string)$socialiteUser->getId())
             ->first();
 
         if ($account instanceof SocialAccount) {
@@ -134,7 +130,7 @@ class LaravelSocialite extends Controller
                 'driver' => $driver,
             ],
             [
-                'identity' => (string) $socialUser->getId(),
+                'identity' => (string)$socialUser->getId(),
                 'username' => $socialUser->getNickname(),
                 'email' => $socialUser->getEmail(),
                 'avatar' => $socialUser->getAvatar(),
@@ -144,7 +140,7 @@ class LaravelSocialite extends Controller
 
     protected function resolveUser(SocialiteUser $socialiteUser, string $driver): User
     {
-        $identity = (string) $socialiteUser->getId();
+        $identity = (string)$socialiteUser->getId();
         $email = $socialiteUser->getEmail();
         $name = $socialiteUser->getName()
             ?: $socialiteUser->getNickname()
@@ -192,7 +188,7 @@ class LaravelSocialite extends Controller
 
     protected function isStateless(string $driver): bool
     {
-        return (bool) data_get(config('socialite.stateless_drivers', []), $driver, false);
+        return (bool)data_get(config('socialite.stateless_drivers', []), $driver, false);
     }
 
     protected function auth(): Guard
@@ -202,12 +198,109 @@ class LaravelSocialite extends Controller
 
     protected function redirectToConfigured(string $key): RedirectResponse
     {
-        $target = (string) config("socialite.redirects.$key", '/');
+        $target = (string)config("socialite.redirects.$key", '/');
 
         if (Str::startsWith($target, 'route:')) {
             return redirect()->route(Str::after($target, 'route:'));
         }
 
         return redirect($target);
+    }
+
+    /**
+     * @param Closure(): mixed $fallback
+     */
+    protected function applyRedirectHook(string $driver, mixed $provider, Closure $fallback): mixed
+    {
+        $hook = $this->resolveRedirectHook($driver);
+        if (!$hook) {
+            Log::debug('Socialite redirect hook not configured, using provider response', [
+                'driver' => $driver,
+            ]);
+
+            return $fallback();
+        }
+
+        try {
+            $hookResponse = $hook->handle($driver, $provider, $fallback);
+        } catch (Throwable $e) {
+            Log::error('Socialite redirect hook failed, falling back to provider response', [
+                'driver' => $driver,
+                'hook' => $hook::class,
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
+
+            return $fallback();
+        }
+
+        if ($hookResponse === null) {
+            Log::debug('Socialite redirect hook returned null, falling back to provider response', [
+                'driver' => $driver,
+                'hook' => $hook::class,
+            ]);
+
+            return $fallback();
+        }
+
+        Log::info('Socialite redirect hook returned custom response', [
+            'driver' => $driver,
+            'hook' => $hook::class,
+            'response_type' => get_debug_type($hookResponse),
+        ]);
+
+        return $hookResponse;
+    }
+
+    protected function resolveRedirectHook(string $driver): ?RedirectHook
+    {
+        $hookClass = data_get($this->redirectHooks(), $driver);
+        if (!is_string($hookClass) || $hookClass === '') {
+            return null;
+        }
+
+        Log::debug('Resolving Socialite redirect hook', [
+            'driver' => $driver,
+            'hook' => $hookClass,
+        ]);
+
+        if (!class_exists($hookClass)) {
+            Log::warning('Configured Socialite redirect hook class does not exist, using fallback response', [
+                'driver' => $driver,
+                'hook' => $hookClass,
+            ]);
+
+            return null;
+        }
+
+        try {
+            $hook = app()->make($hookClass);
+        } catch (Throwable $e) {
+            Log::error('Failed to resolve Socialite redirect hook from container, using fallback response', [
+                'driver' => $driver,
+                'hook' => $hookClass,
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        if (!$hook instanceof RedirectHook) {
+            Log::error('Configured Socialite redirect hook does not implement RedirectHook, using fallback response', [
+                'driver' => $driver,
+                'hook' => $hookClass,
+                'resolved_type' => get_debug_type($hook),
+            ]);
+
+            return null;
+        }
+
+        return $hook;
+    }
+
+    protected function redirectResponseNormalizer(): RedirectResponseNormalizer
+    {
+        return app(RedirectResponseNormalizer::class);
     }
 }

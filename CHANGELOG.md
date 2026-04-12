@@ -2,6 +2,15 @@
 
 All notable changes to `laravel-socialite` will be documented in this file.
 
+## 1.3.0 - unreleased
+
+### What's Changed
+
+- added a generic `redirect_hooks` extension point for custom redirect screens;
+- added lazy hook fallback handling so custom screens do not materialize the provider redirect unless needed;
+- added package tests for redirect hook fallback behavior, including invalid hook contract handling;
+- documented the hook contract, path-repository activation/reset workflow, fallback semantics, and logging points for wrapper-screen integrations.
+
 ## 1.2.0 - 2026-02-22
 
 ### What's Changed

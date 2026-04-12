@@ -11,7 +11,7 @@
         "oauth2-client"
     ],
     "homepage": "https://github.com/ichinya/laravel-socialite",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "license": "MIT",
     "authors": [
         {
@@ -22,10 +22,15 @@
     ],
     "require": {
         "php": "^8.3|8.4|8.5",
-        "laravel/framework": "^13",
+        "laravel/framework": "^12.25|^13.1",
         "laravel/socialite": "*"
     },
     "require-dev": {
+        "laravel/pint": "^1.29",
+        "orchestra/testbench": "^11.1",
+        "pestphp/pest": "^5.0",
+        "pestphp/pest-plugin-laravel": "^5.0",
+        "phpstan/phpstan": "^2.1"
     },
     "autoload": {
         "psr-4": {
@@ -34,6 +39,7 @@
     },
     "autoload-dev": {
         "psr-4": {
+            "Ichinya\\LaravelSocialite\\Tests\\": "tests/"
         }
     },
     "scripts": {

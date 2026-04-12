@@ -1,51 +1,36 @@
-# Socialite for Laravel
+# Laravel Socialite Helper
 
-[![Latest Version on Packagist](https://img.shields.io/packagist/v/ichinya/laravel-socialite.svg?style=flat-square)](https://packagist.org/packages/ichinya/laravel-socialite)
-[![GitHub Tests Action Status](https://img.shields.io/github/actions/workflow/status/ichinya/laravel-socialite/run-tests.yml?branch=main&label=tests&style=flat-square)](https://github.com/ichinya/laravel-socialite/actions?query=workflow%3Arun-tests+branch%3Amain)
-[![GitHub Code Style Action Status](https://img.shields.io/github/actions/workflow/status/ichinya/laravel-socialite/fix-php-code-style-issues.yml?branch=main&label=code%20style&style=flat-square)](https://github.com/ichinya/laravel-socialite/actions?query=workflow%3A"Fix+PHP+code+style+issues"+branch%3Amain)
-[![Total Downloads](https://img.shields.io/packagist/dt/ichinya/laravel-socialite.svg?style=flat-square)](https://packagist.org/packages/ichinya/laravel-socialite)
-
-Пакет добавляет готовый OAuth-вход в Laravel через `laravel/socialite`:
+Пакет добавляет готовый OAuth-вход для Laravel через `laravel/socialite`:
 
 - маршруты `/socialite/{driver}/redirect` и `/socialite/{driver}/callback`;
 - таблицу `social_accounts` для привязки провайдера к пользователю;
 - автоматическую авторизацию существующего пользователя или создание нового;
-- привязку дополнительного провайдера для уже авторизованного пользователя.
+- привязку дополнительного провайдера для уже авторизованного пользователя;
+- generic hook для кастомного redirect screen без правки vendor-кода.
 
 ## Требования
 
-- PHP: `^8.3|8.4|8.5`
-- Laravel: `^12`
+- PHP `^8.3|8.4|8.5`
+- Laravel `^13`
 - `laravel/socialite`
 
 ## Установка
 
 ```bash
 composer require ichinya/laravel-socialite
-```
-
-Опубликуйте конфиг (опционально, но обычно нужно):
-
-```bash
 php artisan vendor:publish --tag=ichinya-socialite
-```
-
-Выполните миграции:
-
-```bash
 php artisan migrate
 ```
 
-## Что происходит при логине
+## Как работает flow
 
-1. Гость нажимает вход через провайдер (`socialite.redirect`).
-2. На callback пакет:
-   - ищет запись в `social_accounts` по `driver + identity`;
-   - если находит, авторизует связанного пользователя;
-   - если не находит, создает пользователя и привязывает аккаунт.
-3. Если пользователь уже авторизован, callback только привязывает новый провайдер к текущему пользователю.
+1. Гость переходит на `socialite.redirect`.
+2. Пакет получает redirect response от Socialite provider.
+3. Если для драйвера настроен `redirect_hook`, пакет даёт hook-классу шанс вернуть кастомный response.
+4. Если hook не настроен, вернул `null` или завершился ошибкой, пакет делает fallback к штатному provider response.
+5. На callback пакет связывает `driver + identity` с пользователем и выполняет login/bind flow.
 
-## Шаг 1. Настройте `config/socialite.php`
+## Настройка `config/socialite.php`
 
 ```php
 <?php
@@ -55,6 +40,10 @@ return [
         'github' => '/assets/socialite/github.svg',
         'google' => '/assets/socialite/google.svg',
         'telegram' => '/assets/socialite/telegram.svg',
+    ],
+
+    'redirect_hooks' => [
+        'telegram' => \App\Infrastructure\Auth\TelegramRedirectScreen::class,
     ],
 
     'stateless_drivers' => [
@@ -69,22 +58,68 @@ return [
 ];
 ```
 
-### Пояснение по ключам
+### Ключи конфига
 
-- `drivers` - список активных провайдеров (`driver => путь_к_иконке`).
-- `stateless_drivers` - драйверы, для которых нужно `->stateless()` (часто `telegram`).
-- `redirects.after_login` - куда отправлять после входа.
-- `redirects.after_bind` - куда отправлять после привязки провайдера.
-- `redirects.on_error` - куда отправлять при ошибке OAuth.  
-  Поддерживает:
-  - URL/путь (`/login`);
-  - `route:имя_маршрута` (например `route:login`).
+- `drivers`: активные провайдеры в формате `driver => icon_path`.
+- `redirect_hooks`: карта `driver => class-string` для container-resolved hook-классов.
+- `stateless_drivers`: драйверы, для которых нужно `->stateless()`.
+- `redirects.after_login`: редирект после login flow.
+- `redirects.after_bind`: редирект после bind flow.
+- `redirects.on_error`: редирект при ошибке OAuth. Поддерживает путь и `route:<name>`.
 
-## Шаг 2. Настройте `config/services.php` и `.env`
+## Generic redirect hook
 
-### Пример для Google/GitHub
+Hook нужен для custom redirect screen, когда provider на этапе `redirect()` отдаёт HTML, legacy widget или другой нестандартный ответ, а приложению нужен собственный wrapper screen.
 
-`config/services.php`:
+Hook-класс должен реализовывать `Ichinya\LaravelSocialite\Contracts\RedirectHook`:
+
+```php
+<?php
+
+namespace App\Infrastructure\Auth;
+
+use Ichinya\LaravelSocialite\Contracts\RedirectHook;
+
+class TelegramRedirectScreen implements RedirectHook
+{
+    public function handle(string $driver, mixed $provider, mixed $providerResponse): mixed
+    {
+        if ($driver !== 'telegram') {
+            return null;
+        }
+
+        return response('<html>custom wrapper screen</html>');
+    }
+}
+```
+
+### Что может вернуть hook
+
+- `Illuminate\Http\Response`
+- `Illuminate\Http\RedirectResponse`
+- `Symfony\Component\HttpFoundation\RedirectResponse`
+- `string`
+- `null`
+
+### Fallback semantics
+
+- hook не настроен: пакет ведёт себя как раньше;
+- hook вернул `null`: используется штатный provider response;
+- hook выбросил исключение: ошибка логируется, затем выполняется fallback;
+- hook не должен заменять callback/login flow, он влияет только на этап `redirect`.
+
+### Диагностика
+
+В логах ищите:
+
+- `DEBUG` на resolve hook по `driver`;
+- `DEBUG` на fallback после `null`;
+- `ERROR` на exception внутри hook или ошибке container resolution;
+- `INFO` на successful custom response.
+
+## Настройка `config/services.php` и `.env`
+
+### Google / GitHub
 
 ```php
 'google' => [
@@ -100,8 +135,6 @@ return [
 ],
 ```
 
-`.env`:
-
 ```dotenv
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
@@ -112,15 +145,13 @@ GITHUB_CLIENT_SECRET=
 GITHUB_REDIRECT_URI="${APP_URL}/socialite/github/callback"
 ```
 
-### Пример для Telegram
+### Telegram
 
-Для Telegram нужен провайдер `socialiteproviders/telegram`.
+Для Telegram нужен `socialiteproviders/telegram`.
 
 ```bash
 composer require socialiteproviders/telegram
 ```
-
-`config/services.php`:
 
 ```php
 'telegram' => [
@@ -131,15 +162,13 @@ composer require socialiteproviders/telegram
 ],
 ```
 
-`.env`:
-
 ```dotenv
 TELEGRAM_LOGIN_BOT_NAME=your_bot_name
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_LOGIN_REDIRECT_URI="${APP_URL}/socialite/telegram/callback"
 ```
 
-Регистрация драйвера Telegram (например в `App\Providers\AppServiceProvider::boot()`):
+Пример регистрации Telegram provider:
 
 ```php
 use Illuminate\Support\Facades\Event;
@@ -151,9 +180,7 @@ Event::listen(function (SocialiteWasCalled $event): void {
 });
 ```
 
-## Шаг 3. Добавьте связь в модель `User`
-
-Пакет работает с `App\Models\User`, поэтому обычно достаточно добавить trait:
+## Связь в модели `User`
 
 ```php
 use Ichinya\LaravelSocialite\Traits\HasSocialites;
@@ -164,36 +191,20 @@ class User extends Authenticatable
 }
 ```
 
-После этого у пользователя будет связь:
+После этого доступна связь:
 
 ```php
-$user->socials; // коллекция SocialAccount
+$user->socials;
 ```
 
-## Шаг 4. Добавьте кнопки входа
-
-```blade
-<a href="{{ route('socialite.redirect', ['driver' => 'github']) }}">
-    Войти через GitHub
-</a>
-
-<a href="{{ route('socialite.redirect', ['driver' => 'google']) }}">
-    Войти через Google
-</a>
-
-<a href="{{ route('socialite.redirect', ['driver' => 'telegram']) }}">
-    Войти через Telegram
-</a>
-```
-
-## Маршруты, которые добавляет пакет
+## Маршруты пакета
 
 - `GET /socialite/{driver}/redirect` (`socialite.redirect`)
 - `GET /socialite/{driver}/callback` (`socialite.callback`)
 
-## Обработка ошибок на форме логина
+## Обработка ошибок на login screen
 
-При ошибке OAuth пакет делает редирект на `socialite.redirects.on_error` и кладет текст ошибки в ключ `socialite`.
+При ошибке OAuth пакет редиректит на `socialite.redirects.on_error` и кладёт текст ошибки в ключ `socialite`.
 
 ```blade
 @if($errors->has('socialite'))
@@ -203,7 +214,7 @@ $user->socials; // коллекция SocialAccount
 
 ## Частые проблемы
 
-### `Invalid state`
+### Invalid state
 
 Добавьте драйвер в `stateless_drivers`:
 
@@ -213,30 +224,21 @@ $user->socials; // коллекция SocialAccount
 ],
 ```
 
-### `Bot username required`
+### Bot username required
 
-Проверьте `services.telegram.bot` и переменную `TELEGRAM_LOGIN_BOT_NAME`.
+Проверьте `services.telegram.bot` и `TELEGRAM_LOGIN_BOT_NAME`.
 
-### Mixed Content (`http` в `https` приложении)
+### Mixed Content
 
 Проверьте:
 
 - `APP_URL=https://...`
-- доверие к proxy-заголовкам (`X-Forwarded-Proto`) в Laravel/веб-сервере.
+- доверие к proxy-заголовкам в Laravel и веб-сервере.
 
-## Журнал изменений
+## Changelog
 
-Смотрите [CHANGELOG](CHANGELOG.md).
-
-## Contributing
-
-Смотрите [CONTRIBUTING](CONTRIBUTING.md).
-
-## Credits
-
-- [Ichi](https://github.com/ichinya)
-- [All Contributors](../../contributors)
+Смотрите [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-The MIT License (MIT). See [LICENSE.md](LICENSE.md).
+MIT. See [LICENSE.md](LICENSE.md).
