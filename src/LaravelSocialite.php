@@ -5,6 +5,7 @@ namespace Ichinya\LaravelSocialite;
 use App\Models\User;
 use Ichinya\LaravelSocialite\Models\SocialAccount;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Contracts\Auth\Guard;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
@@ -194,7 +195,7 @@ class LaravelSocialite extends Controller
         return (bool) data_get(config('socialite.stateless_drivers', []), $driver, false);
     }
 
-    protected function auth(): \Illuminate\Contracts\Auth\Guard
+    protected function auth(): Guard
     {
         return auth()->guard();
     }
