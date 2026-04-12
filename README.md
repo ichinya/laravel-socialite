@@ -11,7 +11,7 @@
 ## Требования
 
 - PHP `^8.3|8.4|8.5`
-- Laravel `^13`
+- Laravel `^12.25|^13.1`
 - `laravel/socialite`
 
 ## Установка
@@ -25,10 +25,29 @@ php artisan migrate
 ## Как работает flow
 
 1. Гость переходит на `socialite.redirect`.
-2. Пакет получает redirect response от Socialite provider.
-3. Если для драйвера настроен `redirect_hook`, пакет даёт hook-классу шанс вернуть кастомный response.
-4. Если hook не настроен, вернул `null` или завершился ошибкой, пакет делает fallback к штатному provider response.
+2. Пакет создаёт provider через `Socialite::driver($driver)`.
+3. Если для драйвера настроен `redirect_hooks`, пакет даёт hook-классу шанс вернуть кастомный response.
+4. Если hook не настроен, вернул `null`, сконфигурирован неверно или завершился ошибкой, пакет делает fallback к штатному provider response.
 5. На callback пакет связывает `driver + identity` с пользователем и выполняет login/bind flow.
+
+## Локальная разработка пакета через path repository
+
+Если пакет разрабатывается локально внутри Laravel-приложения:
+
+```bash
+composer config repositories.ichinya-laravel-socialite path packages/ichinya/laravel-socialite
+composer update ichinya/laravel-socialite
+composer show ichinya/laravel-socialite
+```
+
+Ожидаемый результат проверки: `dist: [path] packages/ichinya/laravel-socialite`.
+
+Чтобы вернуться к обычной версии из registry:
+
+```bash
+composer config --unset repositories.ichinya-laravel-socialite
+composer update ichinya/laravel-socialite
+```
 
 ## Настройка `config/socialite.php`
 
@@ -78,13 +97,20 @@ Hook-класс должен реализовывать `Ichinya\LaravelSocialit
 
 namespace App\Infrastructure\Auth;
 
+use Closure;
 use Ichinya\LaravelSocialite\Contracts\RedirectHook;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Response;
+use Symfony\Component\HttpFoundation\RedirectResponse as SymfonyRedirectResponse;
 
 class TelegramRedirectScreen implements RedirectHook
 {
-    public function handle(string $driver, mixed $provider, mixed $providerResponse): mixed
-    {
-        if ($driver !== 'telegram') {
+    public function handle(
+        string $driver,
+        mixed $provider,
+        Closure $fallback,
+    ): RedirectResponse|Response|SymfonyRedirectResponse|string|null {
+        if ($driver !== 'telegram' || !method_exists($provider, 'getButton')) {
             return null;
         }
 
@@ -92,6 +118,8 @@ class TelegramRedirectScreen implements RedirectHook
     }
 }
 ```
+
+Hook получает lazy callback `$fallback`, если приложению нужно вручную вернуть исходный provider response без преждевременного вызова `redirect()`.
 
 ### Что может вернуть hook
 
@@ -104,6 +132,7 @@ class TelegramRedirectScreen implements RedirectHook
 ### Fallback semantics
 
 - hook не настроен: пакет ведёт себя как раньше;
+- hook сконфигурирован на несуществующий класс или класс с неверным контрактом: ошибка логируется, затем выполняется fallback;
 - hook вернул `null`: используется штатный provider response;
 - hook выбросил исключение: ошибка логируется, затем выполняется fallback;
 - hook не должен заменять callback/login flow, он влияет только на этап `redirect`.
@@ -114,6 +143,7 @@ class TelegramRedirectScreen implements RedirectHook
 
 - `DEBUG` на resolve hook по `driver`;
 - `DEBUG` на fallback после `null`;
+- `WARN` на отсутствующий hook-класс;
 - `ERROR` на exception внутри hook или ошибке container resolution;
 - `INFO` на successful custom response.
 
