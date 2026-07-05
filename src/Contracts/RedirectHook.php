@@ -13,8 +13,8 @@ interface RedirectHook
      * @param Closure(): mixed $fallback
      */
     public function handle(
-        string  $driver,
-        mixed   $provider,
+        string $driver,
+        mixed $provider,
         Closure $fallback
     ): RedirectResponse|Response|SymfonyRedirectResponse|string|null;
 }

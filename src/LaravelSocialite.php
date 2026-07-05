@@ -17,7 +17,6 @@ use Illuminate\Support\Str;
 use Laravel\Socialite\Contracts\User as SocialiteUser;
 use Laravel\Socialite\Facades\Socialite;
 use RuntimeException;
-use Symfony\Component\HttpFoundation\RedirectResponse as SymfonyRedirectResponse;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Throwable;
 
@@ -35,7 +34,7 @@ class LaravelSocialite extends Controller
         $response = $this->applyRedirectHook(
             driver: $driver,
             provider: $provider,
-            fallback: static fn(): mixed => $provider->redirect()
+            fallback: static fn (): mixed => $provider->redirect()
         );
 
         return $this->redirectResponseNormalizer()->normalize($driver, $response);
@@ -99,7 +98,7 @@ class LaravelSocialite extends Controller
 
         $account = SocialAccount::query()
             ->where('driver', $driver)
-            ->where('identity', (string)$socialiteUser->getId())
+            ->where('identity', (string) $socialiteUser->getId())
             ->first();
 
         if ($account instanceof SocialAccount) {
@@ -130,7 +129,7 @@ class LaravelSocialite extends Controller
                 'driver' => $driver,
             ],
             [
-                'identity' => (string)$socialUser->getId(),
+                'identity' => (string) $socialUser->getId(),
                 'username' => $socialUser->getNickname(),
                 'email' => $socialUser->getEmail(),
                 'avatar' => $socialUser->getAvatar(),
@@ -140,7 +139,7 @@ class LaravelSocialite extends Controller
 
     protected function resolveUser(SocialiteUser $socialiteUser, string $driver): User
     {
-        $identity = (string)$socialiteUser->getId();
+        $identity = (string) $socialiteUser->getId();
         $email = $socialiteUser->getEmail();
         $name = $socialiteUser->getName()
             ?: $socialiteUser->getNickname()
@@ -188,7 +187,7 @@ class LaravelSocialite extends Controller
 
     protected function isStateless(string $driver): bool
     {
-        return (bool)data_get(config('socialite.stateless_drivers', []), $driver, false);
+        return (bool) data_get(config('socialite.stateless_drivers', []), $driver, false);
     }
 
     protected function auth(): Guard
@@ -198,7 +197,7 @@ class LaravelSocialite extends Controller
 
     protected function redirectToConfigured(string $key): RedirectResponse
     {
-        $target = (string)config("socialite.redirects.$key", '/');
+        $target = (string) config("socialite.redirects.$key", '/');
 
         if (Str::startsWith($target, 'route:')) {
             return redirect()->route(Str::after($target, 'route:'));
